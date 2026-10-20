@@ -9,6 +9,7 @@ import { LiveCompositor, type CaptureResult, type LiveMode } from '~/render/live
 import type { QualityTier } from '~/render/quality'
 import { WebGLUnavailableError } from '~/render/postfx'
 import { useFaceTracking } from '~/composables/useFaceTracking'
+import { useSegmentation } from '~/composables/useSegmentation'
 import { averageParams, landmarksToParams, type PumpkinFaceParams } from '~/utils/faceMapping'
 import { blendshapesToMap, deriveExpression, type ExpressionState } from '~/utils/expressionMapping'
 import { FaceTrackMatcher, detectionFromLandmarks, type CarveFaceInput, type FaceDetection } from '~/utils/faceTracks'
@@ -37,6 +38,11 @@ const emit = defineEmits<{
 const MIRRORED = true
 const canvas = ref<HTMLCanvasElement | null>(null)
 const tracking = useFaceTracking()
+const segmentation = useSegmentation()
+// person segmentation for the Halloween backdrop (skipped on low-end devices)
+const SEGMENT_INTERVAL_MS = 100
+let segmentReady = false
+let lastSegment = 0
 let compositor: LiveCompositor | null = null
 // the tier is fixed for the lifetime of this component (and of the compositor's pumpkin pool)
 const matcher = new FaceTrackMatcher({ maxTracks: props.tier.maxFaces })
@@ -138,10 +144,25 @@ function infer(now: number) {
   setCount(Math.min(assignments.length, compositor.capacity), detections.length)
 }
 
+function segment(now: number) {
+  const v = props.video
+  if (!segmentReady || !compositor || props.mode !== 'live' || !v || v.readyState < 2) return
+  if (now - lastSegment < SEGMENT_INTERVAL_MS) return
+  lastSegment = now
+  try {
+    const mask = segmentation.segment(v, now)
+    if (mask) compositor.setPersonMask(mask.data, mask.width, mask.height, now / 1000)
+  } catch (e) {
+    console.warn('[kabochau] segmentation failed; continuing without occlusion', e)
+    segmentReady = false
+  }
+}
+
 function loop(now: number) {
   raf = requestAnimationFrame(loop)
   if (!props.active || document.hidden || !compositor) return
   infer(now)
+  segment(now)
   compositor.frame(now)
 }
 
@@ -172,6 +193,14 @@ onMounted(() => {
   resizeObserver.observe(parent)
   emit('status', status)
   raf = requestAnimationFrame(loop)
+  if (props.tier.name !== 'low') {
+    // after the face model, so it never delays the first pumpkin
+    void tracking
+      .load()
+      .catch(() => undefined)
+      .then(() => segmentation.load())
+      .then((seg) => (segmentReady = !!seg && !!compositor))
+  }
 })
 
 watch(

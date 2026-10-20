@@ -550,7 +550,8 @@ export class PumpkinModel {
     this.candle.intensity = 2.6 * g
     this.candle.color.setRGB(1, 0.55 + 0.2 * w, 0.25)
     const flameVisible = Math.min(1, this.glowLevel)
-    this.flame.visible = flameVisible > 0.02
+    // respect setVisible(false): the flicker must not re-show the flame of a hidden pumpkin
+    this.flame.visible = this.shown && flameVisible > 0.02
     this.flame.scale.set(0.14 * (0.9 + 0.1 * flicker), 0.26 * (0.85 + 0.2 * flicker) * flameVisible, 1)
     ;(this.flame.material as THREE.SpriteMaterial).opacity = flameVisible
     if (this.halo) {

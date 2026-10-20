@@ -53,8 +53,10 @@ export function clampSticker(s: PlacedSticker): PlacedSticker {
 /**
  * A new stamp near the centre. Successive stamps are spread on a golden-angle
  * spiral so they don't land exactly on top of each other.
+ * `widthScale` keeps stamps the same size relative to the image's short side
+ * (1 for portrait, height/width for landscape exports).
  */
-export function createSticker(def: StickerDef, index: number, uid: string): PlacedSticker {
+export function createSticker(def: StickerDef, index: number, uid: string, widthScale = 1): PlacedSticker {
   const golden = 2.399963229728653
   const r = index === 0 ? 0 : 0.06 + 0.035 * Math.sqrt(index)
   const a = index * golden
@@ -64,7 +66,7 @@ export function createSticker(def: StickerDef, index: number, uid: string): Plac
     type: def.id,
     x: 0.5 + Math.cos(a) * r,
     y: 0.42 + Math.sin(a) * r * 0.7,
-    w: def.defaultWidth,
+    w: def.defaultWidth * widthScale,
     rotation: def.width / def.height > 2 ? tilt * 0.5 : tilt,
   })
 }

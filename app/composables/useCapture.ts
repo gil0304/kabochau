@@ -43,7 +43,7 @@ export function useCapture() {
     const file = toFile(blob, filename)
     if (!file || !canShare(blob, filename)) return 'unsupported'
     try {
-      await navigator.share({ files: [file], title: 'PUMPKIN ME' })
+      await navigator.share({ files: [file], title: 'カボチャウ' })
       return 'shared'
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return 'cancelled'

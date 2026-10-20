@@ -13,10 +13,11 @@ export function useStickers() {
   const signature = computed(() => stickersSignature(items.value))
   const full = computed(() => items.value.length >= MAX_STICKERS)
 
-  function add(type: StickerId): PlacedSticker | null {
+  /** `imageAspect` = width / height of the image being decorated. */
+  function add(type: StickerId, imageAspect = 9 / 16): PlacedSticker | null {
     const def = STICKER_BY_ID[type]
     if (!def || full.value) return null
-    const s = createSticker(def, items.value.length, `st${++seq}`)
+    const s = createSticker(def, items.value.length, `st${++seq}`, Math.min(1, 1 / imageAspect))
     items.value = [...items.value, s]
     selectedId.value = s.uid
     return s

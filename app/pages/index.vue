@@ -79,6 +79,7 @@ const videoEl = computed(() => cameraView.value?.video ?? null)
 const liveActive = computed(() => phase.value === 'tracking')
 const showStage = computed(() => cameraActive.value && !!tier.value)
 const maxFaces = computed(() => tier.value?.maxFaces ?? 1)
+const showIntro = computed(() => phase.value === 'idle' || (phase.value === 'starting' && !cameraActive.value))
 // LIVE always previews the exported PNG; MAKE switches from the 3D stage to
 // the PNG once stamps come into play, so what is decorated is what is saved.
 const resultImageUrl = computed(() => {
@@ -114,7 +115,7 @@ const hint = computed<{ text: string | null; tone: 'info' | 'warn' }>(() => {
           text:
             faceCount.value.tracked > 1
               ? `ボタンで${faceCount.value.tracked}人それぞれのカボチャをつくります`
-              : '正面を向いてボタンを押すと、顔からカボチャをつくります',
+              : '正面を向いてボタンをタップ',
           tone: 'info',
         }
       if (showMultiHint.value && faceCount.value.tracked > 1)
@@ -131,7 +132,7 @@ const hint = computed<{ text: string | null; tone: 'info' | 'warn' }>(() => {
           tone: 'info',
         }
       return {
-        text: result.value?.mode === 'carve' && !resultImageUrl.value ? 'ドラッグで回転して彫りの深さを確認できます' : null,
+        text: result.value?.mode === 'carve' && !resultImageUrl.value ? 'ドラッグで回転できます' : null,
         tone: 'info',
       }
     default:
@@ -531,38 +532,21 @@ onBeforeUnmount(() => {
     </div>
 
     <header class="topbar">
-      <h1 class="brand">PUMPKIN ME</h1>
+      <h1 v-if="!showIntro" class="brand">カボチャウ</h1>
       <StatusHint :text="hint.text" :tone="hint.tone" />
     </header>
 
-    <!-- start screen -->
-    <section v-if="phase === 'idle' || (phase === 'starting' && !cameraActive)" class="intro" aria-labelledby="intro-title">
-      <div class="intro__glow" aria-hidden="true">
-        <svg viewBox="0 0 120 110" class="intro__pumpkin">
-          <defs>
-            <radialGradient id="pg" cx="50%" cy="45%" r="60%">
-              <stop offset="0%" stop-color="#ff9a2e" />
-              <stop offset="70%" stop-color="#e2620c" />
-              <stop offset="100%" stop-color="#7a2a05" />
-            </radialGradient>
-          </defs>
-          <path d="M60 18c-4-8-1-14 5-16" stroke="#6b5a2a" stroke-width="5" fill="none" stroke-linecap="round" />
-          <ellipse cx="60" cy="62" rx="54" ry="44" fill="url(#pg)" />
-          <path d="M60 18v88M33 22c-12 20-12 64 0 82M87 22c12 20 12 64 0 82" stroke="#b9470a" stroke-width="2" fill="none" opacity=".6" />
-          <path d="M30 52l16-10 6 14zM90 52l-16-10-6 14z" fill="#ffd27a" />
-          <path d="M60 58l-7 12h14z" fill="#ffd27a" />
-          <path d="M26 74c10 18 58 18 68 0-6 4-12 6-16 6l-3 7-5-6c-6 1-12 1-18 0l-5 6-3-7c-6 0-12-2-18-6z" fill="#ffd27a" />
-        </svg>
-      </div>
-      <h2 id="intro-title" class="intro__title">あなたの顔が、光るジャック・オー・ランタンに。</h2>
-      <p class="intro__lead">
-        <strong>LIVE</strong> 表情に合わせて動くカボチャをかぶる<br /><strong>MAKE</strong> 顔の特徴からあなただけのカボチャをつくる
-      </p>
+    <!-- start screen: logo + the two ways in, nothing else -->
+    <section v-if="showIntro" class="intro">
+      <IntroScene />
+      <h1 class="intro__logo">
+        <img src="/logo.webp" alt="カボチャウ" width="720" height="720" decoding="async" />
+      </h1>
       <button type="button" class="btn btn--primary btn--large" :disabled="phase === 'starting'" @click="startCamera">
-        {{ phase === 'starting' ? '起動中…' : 'カメラをはじめる' }}
+        {{ phase === 'starting' ? '起動中…' : 'カメラではじめる' }}
       </button>
-      <button type="button" class="btn btn--text" :disabled="busy" @click="pickPhoto">写真からカボチャをつくる</button>
-      <p class="intro__privacy">顔の解析はすべて端末内で行われ、画像や顔データは送信されません。</p>
+      <button type="button" class="btn btn--text" :disabled="busy" @click="pickPhoto">写真からつくる</button>
+      <p class="intro__privacy">顔データは端末の外に送信しません</p>
     </section>
 
     <!-- errors -->

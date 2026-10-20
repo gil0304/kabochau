@@ -157,6 +157,15 @@ export function chooseExportSize(maxRenderbufferSize: number, maxViewportHeight 
  * axis) fits inside a perspective frustum with vertical FOV `fovYDeg` and
  * `aspect` = width / height, leaving `margin` (fraction) free on each side.
  */
+/**
+ * LIVE saves follow the screen orientation: a landscape preview (e.g. a PC
+ * window) exports landscape (1920×1080) so nothing on screen is cut off;
+ * portrait previews (phones) keep the 1080×1920 story format.
+ */
+export function orientExportSize(size: ExportSize, viewWidth: number, viewHeight: number): ExportSize {
+  return viewWidth > viewHeight ? { ...size, width: size.height, height: size.width } : size
+}
+
 export function fitDistanceForSphere(radius: number, fovYDeg: number, aspect: number, margin = 0.08): number {
   const fovY = (fovYDeg * Math.PI) / 180
   const fovX = 2 * Math.atan(Math.tan(fovY / 2) * aspect)
@@ -187,7 +196,7 @@ export function exportFileName(mode: 'live' | 'carve', date = new Date()): strin
   const p = (n: number) => String(n).padStart(2, '0')
   const stamp = `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}-${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`
   // file names use the visible mode names (the 'carve' mode is shown as MAKE)
-  return `pumpkin-me-${mode === 'carve' ? 'make' : 'live'}-${stamp}.png`
+  return `kabochau-${mode === 'carve' ? 'make' : 'live'}-${stamp}.png`
 }
 
 /** canvas.toBlob with a dataURL fallback (some older WebKit builds return null). */

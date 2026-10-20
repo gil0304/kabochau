@@ -176,6 +176,12 @@ describe('sticker placement', () => {
     expect(keys.size).toBe(placed.length)
   })
 
+  it('keeps new stamps the same size relative to the short side on landscape images', () => {
+    const portrait = createSticker(def, 0, 'p')
+    const landscape = createSticker(def, 0, 'l', 1080 / 1920)
+    expect(portrait.w * 1080).toBeCloseTo(landscape.w * 1920, 9)
+  })
+
   it('moves by frame pixels and keeps the centre on the image', () => {
     const frame = { w: 300, h: 600 }
     const m = moveSticker(sticker(), 30, -60, frame)

@@ -28,7 +28,7 @@ import {
   type CarveLayout,
 } from '../utils/pumpkinGeometry'
 import { GROUP_CARVE_STAGGER, MAX_GROUP, arrangePumpkinGroup, type GroupSlot } from '../utils/pumpkinGroup'
-import { canvasToPngBlob, chooseExportSize, fitDistanceForBox, fitDistanceForSphere } from '../utils/imageExport'
+import { canvasToPngBlob, chooseExportSize, fitDistanceForBox, fitDistanceForSphere, orientExportSize } from '../utils/imageExport'
 import { applyOrbitDrag, orbitCameraPosition, type OrbitOffset } from '../utils/orbit'
 import { PumpkinModel, excludeCandleLights } from './pumpkinModel'
 import { PostFx, createRenderer, snapshotCanvas } from './postfx'
@@ -498,13 +498,16 @@ export class CarveStage {
     }
   }
 
-  /** Renders the finished pumpkins (canonical pose) at 1080×1920 — whole group in frame. */
+  /** Renders the finished pumpkins (canonical pose) at 1080×1920 or 1920×1080 (screen orientation) — whole group in frame. */
   async capture(): Promise<CaptureResult> {
     const gl = this.renderer.getContext()
     if (gl.isContextLost()) throw new Error('WebGL context lost')
     const maxRb = gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) as number
-    const maxVp = (gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array)[1] ?? maxRb
-    let size = chooseExportSize(maxRb, maxVp, this.tier.name === 'low')
+    const vp = gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array
+    const maxVp = Math.min(vp[0] ?? maxRb, vp[1] ?? maxRb)
+    // same rule as LIVE: landscape screens (PC) save landscape, phones portrait;
+    // the camera refits the whole pumpkin / group to whichever aspect is rendered
+    let size = orientExportSize(chooseExportSize(maxRb, maxVp, this.tier.name === 'low'), this.cssW, this.cssH)
     const t = this.lastT
     const renderAt = (w: number, h: number) => {
       this.applySize(w, h, 1)
@@ -518,7 +521,7 @@ export class CarveStage {
       try {
         out = renderAt(size.width, size.height)
       } catch {
-        size = chooseExportSize(0)
+        size = orientExportSize(chooseExportSize(0), this.cssW, this.cssH)
         out = renderAt(size.width, size.height)
       }
     } finally {

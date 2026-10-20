@@ -53,7 +53,7 @@ watch(
 onBeforeUnmount(() => observer?.disconnect())
 
 function add(id: StickerId) {
-  props.board.add(id)
+  props.board.add(id, (props.imageWidth ?? 9) / (props.imageHeight ?? 16))
 }
 </script>
 
@@ -61,7 +61,7 @@ function add(id: StickerId) {
   <div class="result" :class="{ 'has-image': !!imageUrl, 'is-decorating': decorating }">
     <figure v-if="imageUrl" ref="figure" class="result__figure">
       <div class="result__frame" :class="{ 'has-stickers': hasStickers }" :style="{ width: `${fit.w}px`, height: `${fit.h}px` }">
-        <img :src="imageUrl" :alt="imageAlt ?? '撮影したPUMPKIN ME画像'" class="result__image" draggable="false" />
+        <img :src="imageUrl" :alt="imageAlt ?? 'カボチャウで撮影した画像'" class="result__image" draggable="false" />
         <StickerLayer :board="board" :width="fit.w" :height="fit.h" :editing="decorating" />
       </div>
     </figure>

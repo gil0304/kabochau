@@ -48,6 +48,7 @@ import {
   canvasToPngBlob,
   chooseExportSize,
   coverCrop,
+  orientExportSize,
   liveExportCrop,
   liveFaceDepth,
   sourcePixelScale,
@@ -55,7 +56,10 @@ import {
   videoUvTransform,
   type CropRect,
 } from '../utils/imageExport'
+import { boundsCenter, coverageFit, projectedEllipse, smoothCoverage } from '../utils/headCoverage'
+import type { Vec2 } from '../utils/math'
 import { PumpkinModel } from './pumpkinModel'
+import { HalloweenBackdrop } from './halloweenBackdrop'
 import { PostFx, createRenderer, snapshotCanvas } from './postfx'
 import { createPumpkinTextures, type PumpkinTextures } from './textures'
 import { FrameGovernor, type QualityTier } from './quality'
@@ -93,6 +97,9 @@ const DEPTH = 10
 // leaving the chin / hair uncovered. 16° keeps that under ~6%.
 const FOV = 16
 const BLOOM_STRENGTH = 0.6
+/** silhouette safety margin (ribs / dimples make the real outline smaller than the ellipsoid) */
+const COVER_MARGIN = 0.88
+const COVER_MAX = 1.5
 const MIRRORED = true
 
 const bgVertex = /* glsl */ `
@@ -106,6 +113,7 @@ const bgFragment = /* glsl */ `
   uniform float uDesat;
   uniform vec3 uTint;
   uniform float uHasVideo;
+  uniform float uNight;
   varying vec2 vUv;
   void main() {
     vec2 uv = vec2(vUv.x * uUv.x + uUv.z, vUv.y * uUv.y + uUv.w);
@@ -126,9 +134,38 @@ const bgFragment = /* glsl */ `
     } else {
       c = texture2D(uVideo, uv).rgb * uHasVideo;
       float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-      c = mix(c, vec3(l), uDesat) * uDim * uTint;
+      vec3 day = mix(c, vec3(l), uDesat) * uDim * uTint;
+      // Halloween night: the room behind the people turns into a moonlit purple night
+      vec3 night = mix(c, vec3(l), 0.5) * vec3(0.3, 0.25, 0.46) * mix(1.1, 0.72, vUv.y);
+      c = mix(day, night, uNight);
     }
     gl_FragColor = vec4(c, 1.0);
+  }`
+
+// People (segmentation mask) drawn over the backdrop with the normal LIVE
+// grade; at the far plane with depth test so pumpkin heads stay in front.
+const personVertex = /* glsl */ `
+  varying vec2 vUv;
+  void main() { vUv = uv; gl_Position = vec4(position.xy, 0.9999, 1.0); }`
+const personFragment = /* glsl */ `
+  uniform sampler2D uVideo;
+  uniform sampler2D uMask;
+  uniform vec4 uUv;
+  uniform float uDim;
+  uniform float uDesat;
+  uniform vec3 uTint;
+  uniform float uOpacity;
+  varying vec2 vUv;
+  void main() {
+    vec2 uv = vec2(vUv.x * uUv.x + uUv.z, vUv.y * uUv.y + uUv.w);
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) discard;
+    // mask rows run top -> bottom, the video texture is flipped (v = 1 at the top)
+    float m = texture2D(uMask, vec2(uv.x, 1.0 - uv.y)).r;
+    float a = smoothstep(0.3, 0.7, m) * uOpacity;
+    if (a < 0.003) discard;
+    vec3 c = texture2D(uVideo, uv).rgb;
+    float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    gl_FragColor = vec4(mix(c, vec3(l), uDesat) * uDim * uTint, a);
   }`
 
 const scanVertex = /* glsl */ `
@@ -167,6 +204,10 @@ class LiveTrack {
   lastLayout = -Infinity
   layoutDirty = false
   landmarks: readonly LandmarkLike[] | null = null
+  /** slide toward the face + extra scale so the whole face stays covered (utils/headCoverage.ts) */
+  coverShift = 0
+  coverGrow = 1
+  coverTime = -Infinity
   private tmpVec = new THREE.Vector3()
 
   constructor(readonly model: PumpkinModel) {}
@@ -182,6 +223,9 @@ class LiveTrack {
     this.expression = this.targetExpression = NEUTRAL_EXPRESSION
     this.landmarks = null
     this.lastLayout = -Infinity
+    this.coverShift = 0
+    this.coverGrow = 1
+    this.coverTime = -Infinity
     this.anchorFilter.reset()
     this.axisFilter.reset()
     this.pointFilter.reset()
@@ -277,6 +321,14 @@ export class LiveCompositor {
   private bgMesh: THREE.Mesh
   private textures: PumpkinTextures
   private tracks: LiveTrack[] = []
+  private backdrop: HalloweenBackdrop
+  private personMaterial: THREE.ShaderMaterial
+  private personMesh: THREE.Mesh
+  private maskTexture: THREE.DataTexture
+  private maskData: Uint8Array
+  /** time (s) of the last person mask; the occlusion fades out when masks stop */
+  private maskTime = -Infinity
+  private maskLevel = 0
   private envTarget: THREE.WebGLRenderTarget | null = null
   private scanPoints: THREE.Points
   private scanLines: THREE.LineSegments
@@ -322,6 +374,7 @@ export class LiveCompositor {
         uDesat: { value: 0.12 },
         uTint: { value: new THREE.Vector3(0.96, 0.97, 1.04) },
         uHasVideo: { value: 0 },
+        uNight: { value: 0 },
       },
       vertexShader: bgVertex,
       fragmentShader: bgFragment,
@@ -332,6 +385,35 @@ export class LiveCompositor {
     this.bgMesh.frustumCulled = false
     this.bgMesh.renderOrder = -1000
     this.scene.add(this.bgMesh)
+
+    // Halloween backdrop (LIVE) + segmented people drawn over it
+    this.backdrop = new HalloweenBackdrop()
+    this.scene.add(this.backdrop.group)
+    this.maskData = new Uint8Array(4)
+    this.maskTexture = new THREE.DataTexture(this.maskData, 2, 2, THREE.RedFormat, THREE.UnsignedByteType)
+    this.maskTexture.minFilter = this.maskTexture.magFilter = THREE.LinearFilter
+    this.maskTexture.needsUpdate = true
+    const bgU = this.bgMaterial.uniforms
+    this.personMaterial = new THREE.ShaderMaterial({
+      uniforms: {
+        uVideo: bgU.uVideo!,
+        uUv: bgU.uUv!,
+        uDim: bgU.uDim!,
+        uDesat: bgU.uDesat!,
+        uTint: bgU.uTint!,
+        uMask: { value: this.maskTexture },
+        uOpacity: { value: 0 },
+      },
+      vertexShader: personVertex,
+      fragmentShader: personFragment,
+      transparent: true,
+      depthTest: true,
+      depthWrite: false,
+    })
+    this.personMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.personMaterial)
+    this.personMesh.frustumCulled = false
+    this.personMesh.renderOrder = -800
+    this.scene.add(this.personMesh)
 
     // lighting: warm key from above-front, cool rim, soft ambient + room env for sheen
     this.scene.add(new THREE.HemisphereLight(0xffe2c4, 0x1c120c, 0.45))
@@ -503,6 +585,31 @@ export class LiveCompositor {
     }
   }
 
+  /**
+   * Person-probability mask from the selfie segmenter (source orientation,
+   * values 0..1). Lightly smoothed over time to calm edge flicker.
+   */
+  setPersonMask(data: Float32Array, width: number, height: number, timeSec: number): void {
+    const n = width * height
+    if (n <= 0 || data.length < n) return
+    const fresh = this.maskTexture.image.width !== width || this.maskTexture.image.height !== height || timeSec - this.maskTime > 0.5
+    if (this.maskData.length !== n) this.maskData = new Uint8Array(n)
+    const out = this.maskData
+    for (let i = 0; i < n; i++) {
+      const v = Math.max(0, Math.min(255, data[i]! * 255))
+      out[i] = fresh ? v : out[i]! * 0.35 + v * 0.65
+    }
+    if (this.maskTexture.image.width !== width || this.maskTexture.image.height !== height || this.maskTexture.image.data !== out) {
+      this.maskTexture.dispose()
+      this.maskTexture = new THREE.DataTexture(out, width, height, THREE.RedFormat, THREE.UnsignedByteType)
+      this.maskTexture.minFilter = this.maskTexture.magFilter = THREE.LinearFilter
+      this.maskTexture.unpackAlignment = 1
+      this.personMaterial.uniforms.uMask!.value = this.maskTexture
+    }
+    this.maskTexture.needsUpdate = true
+    this.maskTime = timeSec
+  }
+
   /** Clears tracking immediately (e.g. after returning from the result view). */
   resetTracking(): void {
     for (const tr of this.tracks) tr.release()
@@ -517,6 +624,9 @@ export class LiveCompositor {
   private updateState(t: number): void {
     const dt = clamp(t - this.lastTime, 0, 0.1)
     this.lastTime = t
+    // person occlusion fades in with masks and out when they stop arriving
+    const masked = this.mode === 'live' && t - this.maskTime < 1
+    this.maskLevel += ((masked ? 1 : 0) - this.maskLevel) * dampFactor(dt, 0.25)
     for (const tr of this.tracks) {
       if (tr.free) continue
       tr.update(t, dt, this.mode)
@@ -529,6 +639,15 @@ export class LiveCompositor {
     const vs = this.videoSize()
     const uv = videoUvTransform(crop, MIRRORED)
     this.bgMaterial.uniforms.uUv!.value.set(uv.sx, uv.sy, uv.ox, uv.oy)
+    // Halloween backdrop in LIVE: with a person mask the room becomes night and
+    // the people are redrawn over the objects; without one, only a light grade
+    const halloween = this.mode === 'live' && !!vs
+    this.backdrop.visible = halloween
+    // objects low in the frame (castle, mist, embers) would sit on bodies without a mask
+    if (halloween) this.backdrop.update(this.lastTime, this.camera, this.maskLevel)
+    this.personMesh.visible = halloween && this.maskLevel > 0.01
+    this.personMaterial.uniforms.uOpacity!.value = this.maskLevel
+    this.bgMaterial.uniforms.uNight!.value = halloween ? 0.3 + 0.7 * this.maskLevel : 0
     if (vs) {
       const cover = videoUvTransform(coverCrop(vs.w, vs.h, w, h), MIRRORED)
       this.bgMaterial.uniforms.uCoverUv!.value.set(cover.sx, cover.sy, cover.ox, cover.oy)
@@ -550,11 +669,15 @@ export class LiveCompositor {
       const z = new THREE.Vector3().crossVectors(pose.x, pose.y)
       this.tmpMatrix.makeBasis(pose.x, pose.y, z)
       this.tmpQuat.setFromRotationMatrix(this.tmpMatrix)
-      const pop = smoothstep(0, 1, tr.visibility)
-      const scale = s * (0.6 + 0.4 * pop) * (pop > 0 ? 1 : 0)
       const anchorWorld = this.tmpVec.set((anchorPx.x - w / 2) * worldPerPx, (h / 2 - anchorPx.y) * worldPerPx, -depth)
-      const offset = this.anchorOnPumpkin.clone().multiplyScalar(scale).applyQuaternion(this.tmpQuat)
+      const cover = this.faceCoverage(tr, anchorWorld, s, crop, w, h, worldPerPx)
+      const pop = smoothstep(0, 1, tr.visibility)
+      const scale = s * cover.grow * (0.6 + 0.4 * pop) * (pop > 0 ? 1 : 0)
+      // pumpkin centre pinned at the eyes (full-size offset), slid toward the face if needed
+      const offset = this.anchorOnPumpkin.clone().multiplyScalar(s).applyQuaternion(this.tmpQuat)
       tr.model.group.position.copy(anchorWorld).sub(offset)
+      tr.model.group.position.x += cover.dx
+      tr.model.group.position.y += cover.dy
       tr.model.group.quaternion.copy(this.tmpQuat)
       tr.model.group.scale.setScalar(Math.max(1e-4, scale))
     }
@@ -586,6 +709,49 @@ export class LiveCompositor {
     }
   }
 
+  /**
+   * How far the pumpkin of `tr` must slide toward the face (and, if that is
+   * not enough, grow) so that every face landmark stays inside its silhouette
+   * — e.g. when looking down the pumpkin centre swings up and the chin would
+   * otherwise peek out. Computed in the screen plane at the anchor depth
+   * (near-orthographic camera). Returns the world-plane offset and growth.
+   */
+  private faceCoverage(
+    tr: LiveTrack,
+    anchorWorld: THREE.Vector3,
+    scale: number,
+    crop: CropRect,
+    w: number,
+    h: number,
+    worldPerPx: number,
+  ): { dx: number; dy: number; grow: number } {
+    const offset = this.anchorOnPumpkin.clone().multiplyScalar(scale).applyQuaternion(this.tmpQuat)
+    const center = { x: anchorWorld.x - offset.x, y: anchorWorld.y - offset.y }
+    const lm = tr.landmarks
+    const e = this.tmpMatrix.elements // rotation (basis) set just before; column-major
+    const shape = LIVE_PUMPKIN_SHAPE
+    const quad = lm?.length
+      ? projectedEllipse([e[0]!, e[4]!, e[8]!, e[1]!, e[5]!, e[9]!, e[2]!, e[6]!, e[10]!], [shape.radiusX, shape.radiusY, shape.radiusZ], scale, COVER_MARGIN)
+      : null
+    let target = center
+    if (lm && quad) {
+      const points: Vec2[] = new Array(Math.min(lm.length, 468))
+      for (let i = 0; i < points.length; i++) {
+        const l = lm[i]!
+        const p = sourceToViewport({ x: MIRRORED ? 1 - l.x : l.x, y: l.y }, crop, w, h)
+        points[i] = { x: (p.x - w / 2) * worldPerPx, y: (h / 2 - p.y) * worldPerPx }
+      }
+      target = boundsCenter(points)
+      const fit = coverageFit(points, center, target, quad, COVER_MAX)
+      const dt = Math.max(0, this.lastTime - tr.coverTime)
+      const step = Number.isFinite(dt) ? dt : 0
+      tr.coverShift = smoothCoverage(tr.coverShift, fit.shift, step)
+      tr.coverGrow = smoothCoverage(tr.coverGrow, fit.grow, step)
+      tr.coverTime = this.lastTime
+    }
+    return { dx: (target.x - center.x) * tr.coverShift, dy: (target.y - center.y) * tr.coverShift, grow: tr.coverGrow }
+  }
+
   /** Renders one frame to the canvas. */
   frame(nowMs: number): void {
     const t = nowMs / 1000
@@ -614,8 +780,9 @@ export class LiveCompositor {
     const gl = this.renderer.getContext()
     if (gl.isContextLost()) throw new Error('WebGL context lost')
     const maxRb = gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) as number
-    const maxVp = (gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array)[1] ?? maxRb
-    let size = chooseExportSize(maxRb, maxVp, this.tier.name === 'low')
+    const vp = gl.getParameter(gl.MAX_VIEWPORT_DIMS) as Int32Array
+    const maxVp = Math.min(vp[0] ?? maxRb, vp[1] ?? maxRb)
+    let size = orientExportSize(chooseExportSize(maxRb, maxVp, this.tier.name === 'low'), this.cssW, this.cssH)
     const previewCrop = coverCrop(vs.w, vs.h, this.cssW, this.cssH)
     // every pumpkin head the user could see in the preview (people outside the
     // on-screen crop must not drag the saved framing toward them): centred on
@@ -652,7 +819,7 @@ export class LiveCompositor {
       try {
         out = renderAt(size.width, size.height)
       } catch {
-        size = chooseExportSize(0)
+        size = orientExportSize(chooseExportSize(0), this.cssW, this.cssH)
         out = renderAt(size.width, size.height)
       }
     } finally {
@@ -674,6 +841,10 @@ export class LiveCompositor {
     for (const tr of this.tracks) tr.model.dispose()
     this.textures.dispose()
     this.videoTexture.dispose()
+    this.backdrop.dispose()
+    this.personMaterial.dispose()
+    this.personMesh.geometry.dispose()
+    this.maskTexture.dispose()
     this.bgMaterial.dispose()
     this.bgMesh.geometry.dispose()
     this.scanPoints.geometry.dispose()

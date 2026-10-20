@@ -8,6 +8,7 @@ import {
   fitDistanceForSphere,
   liveExportCrop,
   liveFaceDepth,
+  orientExportSize,
   projectedSphereFraction,
   sourcePixelScale,
   sourceToViewport,
@@ -152,6 +153,18 @@ describe('liveExportCrop', () => {
   })
 })
 
+describe('orientExportSize', () => {
+  it('saves landscape for landscape previews (PC) and portrait for phones', () => {
+    const base = chooseExportSize(8192)
+    expect(orientExportSize(base, 1440, 900)).toEqual({ width: 1920, height: 1080, fallback: false })
+    expect(orientExportSize(base, 390, 844)).toEqual({ width: 1080, height: 1920, fallback: false })
+    expect(orientExportSize(chooseExportSize(0), 1600, 900)).toEqual({ width: 1280, height: 720, fallback: true })
+    // the landscape export crop of a landscape webcam keeps the whole frame width (nothing cut off)
+    const crop = liveExportCrop(1280, 720, coverCrop(1280, 720, 1440, 900), [], 1920, 1080)
+    expect(crop.w).toBe(1)
+  })
+})
+
 describe('liveFaceDepth', () => {
   it('puts nearer (bigger) faces closer and keeps the projected size unchanged', () => {
     const near = liveFaceDepth(0.5)
@@ -187,6 +200,6 @@ describe('export sizing & framing', () => {
   })
 
   it('creates timestamped PNG names', () => {
-    expect(exportFileName('carve', new Date(2026, 9, 31, 21, 5, 9))).toBe('pumpkin-me-make-20261031-210509.png')
+    expect(exportFileName('carve', new Date(2026, 9, 31, 21, 5, 9))).toBe('kabochau-make-20261031-210509.png')
   })
 })
